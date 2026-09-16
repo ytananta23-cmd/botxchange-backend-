@@ -1,0 +1,104 @@
+// Prisma schema for BotXchange backend
+// Uses PostgreSQL — Render.com provides a free managed Postgres instance.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  passwordHash     String
+  name             String?
+  language         String   @default("en")
+  oneClickTrading  Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  accounts ExchangeAccount[]
+}
+
+// An "account" the frontend trades on. Both "demo" and "real" are genuine
+// Delta Exchange India accounts linked via encrypted API key/secret —
+// "demo" points at Delta's testnet (https://testnet.delta.exchange, paper
+// money, real matching engine) and "real" points at production. There is
+// no local balance simulation: balances, orders, and positions are always
+// read live from Delta (testnet or prod, based on `type`).
+model ExchangeAccount {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label             String
+  type              String   // "demo" (-> Delta testnet) | "real" (-> Delta production)
+
+  // AES-256-GCM encrypted at rest — see utils/crypto.ts. Required for both types.
+  apiKeyEncrypted    String
+  apiSecretEncrypted String
+
+  createdAt         DateTime @default(now())
+
+  orders Order[]
+  bots   Bot[]
+
+  @@index([userId])
+}
+
+model Order {
+  id           String   @id @default(cuid())
+  accountId    String
+  account      ExchangeAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // Set when this order was placed automatically by a bot (see botEngine.ts)
+  // rather than manually via the trade ticket. Used to attribute trades to
+  // a specific bot for its performance stats — kept nullable, and set to
+  // null (not deleted) if the bot itself is later removed, so historical
+  // trade records survive.
+  botId        String?
+  bot          Bot?     @relation(fields: [botId], references: [id], onDelete: SetNull)
+  symbol       String
+  side         String   // "buy" | "sell"
+  size         Float
+  orderType    String   // "market" | "limit" | "stop"
+  limitPrice   Float?
+  stopLoss     Float?
+  takeProfit   Float?
+  status       String   // "open" | "pending" | "closed" | "cancelled"
+  filledPrice  Float?
+  // Set only for bot-driven fills (see botEngine.ts) — the same delta that
+  // gets added to Bot.pnl when the trade closes. Lets the performance
+  // endpoint sum "profit in the last N days" instead of only ever
+  // returning the bot's all-time running total.
+  realizedPnl  Float?
+  deltaOrderId String?  // the order id returned by Delta Exchange (testnet for demo, production for real)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([accountId, status])
+  @@index([botId])
+}
+
+model Bot {
+  id           String   @id @default(cuid())
+  accountId    String
+  account      ExchangeAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name         String
+  symbol       String
+  strategyType String   // "trend" — multi-timeframe EMA + RSI trend-following
+  preset       String   // "conservative" | "optimal" | "aggressive" | "custom" — maps to a timeframe pair + stop-loss/take-profit width, see botEngine.ts
+  paramsJson   String   // JSON-encoded strategy parameters
+  status       String   @default("active") // "active" | "stopped"
+  mode         String   // "real" | "demo"
+  pnl          Float    @default(0)
+  entryPrice   Float?
+  positionSide String?  // "long" | "short" | null (flat, looking for an entry)
+  createdAt    DateTime @default(now())
+  lastRunAt    DateTime?
+
+  orders Order[]
+
+  @@index([accountId, status, mode])
+}
